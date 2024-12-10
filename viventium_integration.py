@@ -3,7 +3,10 @@ import aiohttp
 from typing import Any
 from fake_useragent import UserAgent
 from submodule_integrations.models.integration import Integration
-from submodule_integrations.utils.errors import IntegrationAuthError, IntegrationAPIError
+from submodule_integrations.utils.errors import (
+    IntegrationAuthError,
+    IntegrationAPIError,
+)
 
 
 class ViventiumIntegration(Integration):
@@ -12,9 +15,19 @@ class ViventiumIntegration(Integration):
         self.user_agent = user_agent
         self.network_requester = None
         self.url = "https://hcm.viventium.com/api"
+        self.cookies = None
+        self.xsrf_token = None
 
-    async def initialize(self, network_requester=None):
+    async def initialize(
+        self,
+        cookies: dict | str = None,
+        network_requester=None,
+    ):
         self.network_requester = network_requester
+        self.cookies = (
+            self.make_cookie_string(cookies) if isinstance(cookies, dict) else cookies
+        )
+        self.xsrf_token = cookies.get("VM-XT-89001")
 
     async def _make_request(self, method: str, url: str, **kwargs):
         """
@@ -36,9 +49,11 @@ class ViventiumIntegration(Integration):
                 return await response.json()
             except (json.decoder.JSONDecodeError, aiohttp.ContentTypeError):
                 # return await response.read()
-                raise IntegrationAPIError(integration_name="viventium",
-                                          status_code=response.status,
-                                          message=await response.text())
+                raise IntegrationAPIError(
+                    integration_name="viventium",
+                    status_code=response.status,
+                    message=await response.text(),
+                )
 
         status_code = response.status
         # do things with fail status codes
@@ -63,58 +78,45 @@ class ViventiumIntegration(Integration):
 
     async def _setup_headers(self, xsrf_token: str):
         _headers = {
-            'Host': 'hcm.viventium.com',
-            'User-Agent': self.user_agent,
-            'Accept': 'application/json, text/plain, */*',
-            'Accept-Language': 'en-GB,en;q=0.5',
-            'X-XSRF-TOKEN': xsrf_token,
-            'Connection': 'keep-alive',
-            'Referer': 'https://hcm.viventium.com/apps/vm/',
-            'Sec-Fetch-Dest': 'empty',
-            'Sec-Fetch-Mode': 'cors',
-            'Sec-Fetch-Site': 'same-origin',
+            "Host": "hcm.viventium.com",
+            "User-Agent": self.user_agent,
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-GB,en;q=0.5",
+            "X-XSRF-TOKEN": xsrf_token,
+            "Connection": "keep-alive",
+            "Referer": "https://hcm.viventium.com/apps/vm/",
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
         }
         return _headers
 
     @staticmethod
     def make_cookie_string(cookies: dict) -> str:
-        return '; '.join(f"{key}={value}" for key, value in cookies.items())
+        return "; ".join(f"{key}={value}" for key, value in cookies.items())
 
-    async def _get_division_id(self, token: str, cookies: dict | str):
+    async def _get_division_id(self):
         """
         Retrieves the division ID for the authenticated account using the PayStream API.
-        This method should be called before making requests that require a division ID,
-        as the token and cookies need to be current for authentication.
-
-        Args:
-            token (str): XSRF token for request authentication
-            cookies (dict): Session cookies required for authentication
-
-        Returns:
-            str: The division ID from the first division in the response list
         """
         endpoint = "paystream/v1/divisions"
         path = f"{self.url}/{endpoint}"
         params = {
-            'pageNumber': '1',
-            'pageSize': '1000',
+            "pageNumber": "1",
+            "pageSize": "1000",
         }
-        headers = await self._setup_headers(xsrf_token=token)
-        if type(cookies) is dict:
-            cookies = self.make_cookie_string(cookies)
-        headers['Cookie'] = cookies
+        headers = await self._setup_headers(xsrf_token=self.xsrf_token)
+        headers["Cookie"] = self.cookies
 
         response = await self._make_request("GET", path, headers=headers, params=params)
         this_division: dict = response[0]
         return this_division.get("id")
 
-    async def fetch_employee_profiles(self, xsrf_token: str, cookies: dict | str):
-        division_id = await self._get_division_id(token=xsrf_token, cookies=cookies)
+    async def fetch_employee_profiles(self):
+        division_id = await self._get_division_id()
 
-        headers = await self._setup_headers(xsrf_token=xsrf_token)
-        if type(cookies) is dict:
-            cookies = self.make_cookie_string(cookies)
-        headers['Cookie'] = cookies
+        headers = await self._setup_headers(xsrf_token=self.xsrf_token)
+        headers["Cookie"] = self.cookies
 
         endpoint = f"paystream/v1/divisions/{division_id}/grids/EmployeeProfile"
         path = f"{self.url}/{endpoint}"
@@ -128,25 +130,22 @@ class ViventiumIntegration(Integration):
                     {
                         "fieldName": "EmployeeStatus",
                         "filterType": "In",
-                        "parsableValue": '["Active"]'
+                        "parsableValue": '["Active"]',
                     }
                 ],
                 "sortParameters": [
-                    {
-                        "fieldName": "EmployeeNumber",
-                        "direction": "Ascending"
-                    }
+                    {"fieldName": "EmployeeNumber", "direction": "Ascending"}
                 ],
                 "pageSize": 100,
                 "whereParameters": [],
-                "pageNumber": page
+                "pageNumber": page,
             }
             # The key is to pass the JSON-encoded string of query_options
-            params = {
-                "queryOptions": json.dumps(query_options)
-            }
+            params = {"queryOptions": json.dumps(query_options)}
 
-            response = await self._make_request("GET", path, headers=headers, params=params)
+            response = await self._make_request(
+                "GET", path, headers=headers, params=params
+            )
             employees = response
             if len(employees) > 0:
                 employee_list.extend(employees)
@@ -160,6 +159,6 @@ class ViventiumIntegration(Integration):
             page += 1
 
         for employee in employee_list:
-            employee.pop('DivisionKey')
+            employee.pop("DivisionKey")
 
         return employee_list
